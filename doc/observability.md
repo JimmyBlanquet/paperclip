@@ -1009,7 +1009,9 @@ later: on the reply's return trip, or after the agent received the decision.
 Both fields hold only a boolean and a count.
 
 A sandbox ACP run also records how its agent process session ended, when the
-host bridge saw it end before finalization. `acpProcessTerminalSource` is one of
+host bridge saw it end before finalization. Startup failures (`create_runtime`,
+`ensure_session`, `configure_session`) carry the same fields, so an agent process
+that dies during the handshake is reported too. `acpProcessTerminalSource` is one of
 `remote_event`, `input_delivery`, `output_poll`, `output_stream`, or
 `proxy_close`, and `acpProcessTerminalOutcome` is `exit` or `error`.
 `acpProcessTerminalExitCode` (0–255) and `acpProcessTerminalSignal` (a closed
