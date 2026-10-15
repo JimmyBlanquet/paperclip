@@ -1008,6 +1008,16 @@ before the request reached Paperclip. A call whose request arrived stalled
 later: on the reply's return trip, or after the agent received the decision.
 Both fields hold only a boolean and a count.
 
+A sandbox ACP run also records how its agent process session ended, when the
+host bridge saw it end before finalization. `acpProcessTerminalSource` is one of
+`remote_event`, `input_delivery`, `output_poll`, `output_stream`, or
+`proxy_close`, and `acpProcessTerminalOutcome` is `exit` or `error`.
+`acpProcessTerminalExitCode` (0–255) and `acpProcessTerminalSignal` (a closed
+POSIX signal name) are present only when known. These are the same values as the
+run log's `ACP process session terminal:` line. They separate a killed or exited
+agent process from a host proxy close after a generic ACP connection failure. The
+server drops all of them if the source is not a closed label.
+
 ACP and legacy OpenCode results retain the adapter's resolved wall-clock timeout as
 `adapterExecutionTimeout` in the instance run result. Finalization uses it for
 `effectiveTimeoutSec`, `timeoutSource`, and `timeoutConfigured`. Sources are
