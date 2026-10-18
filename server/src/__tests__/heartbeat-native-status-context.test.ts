@@ -119,4 +119,56 @@ describe("native status wake context provenance", () => {
     expect(merged.paperclipExternalChatExecutionBound).toBeUndefined();
     expect(merged.paperclipWake).toBeUndefined();
   });
+
+  const childCompletion = {
+    issueId: "issue-1",
+    taskId: "issue-1",
+    source: "issue.children_completed",
+    wakeReason: "issue_children_completed",
+    completedChildIssueId: "child-1",
+  };
+
+  it("preserves a verified chat source when a same-issue child completion coalesces into the run", () => {
+    const merged = mergeCoalescedContextSnapshot(
+      {
+        issueId: "issue-1",
+        source: "chat:slack",
+        wakeCommentId: "comment-1",
+        wakeCommentIds: ["comment-1"],
+      },
+      childCompletion,
+    );
+
+    expect(merged).toMatchObject({
+      source: "chat:slack",
+      wakeReason: "issue_children_completed",
+      completedChildIssueId: "child-1",
+      wakeCommentId: "comment-1",
+      wakeCommentIds: ["comment-1"],
+    });
+  });
+
+  it("retains the exact admitted chat wake when a same-issue child completion coalesces", () => {
+    const merged = mergeCoalescedContextSnapshot(
+      reviewedContext,
+      childCompletion,
+    );
+    expect(merged).toMatchObject(reviewedContext);
+    expect(merged.completedChildIssueId).toBe("child-1");
+    expect(merged.paperclipWake).toBe(reviewedContext.paperclipWake);
+  });
+
+  it.each([
+    { ...childCompletion, issueId: "unrelated-issue" },
+    { ...childCompletion, wakeReason: "issue_commented" },
+  ])(
+    "does not preserve chat provenance for a child completion outside the admitted scope: %j",
+    (incoming) => {
+      const merged = mergeCoalescedContextSnapshot(
+        { issueId: "issue-1", source: "chat:slack" },
+        incoming,
+      );
+      expect(merged.source).toBe("issue.children_completed");
+    },
+  );
 });
