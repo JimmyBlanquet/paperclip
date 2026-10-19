@@ -506,6 +506,23 @@ interface AcpxPreparedRuntime {
 }
 
 const defaultWarmHandles = new Map<string, RuntimeCacheEntry>();
+
+// ixtria #35: env var that carries each Paperclip runtime MCP bearer token for
+// local claude runs (connectionIds set in server/src/services/heartbeat.ts).
+const PAPERCLIP_MCP_TOKEN_ENV_VARS: Readonly<Record<string, string>> = {
+  "paperclip-project-tools": "PAPERCLIP_API_KEY",
+  "paperclip-runtime-tools": "PAPERCLIP_RUNTIME_TOOLS_TOKEN",
+};
+// Tool-gateway server: connectionId `assignment:<sha256 hex digest>`. The var
+// name is derived from the digest; any other shape keeps the literal header.
+const ASSIGNMENT_CONNECTION_ID = /^assignment:([0-9a-f]{1,128})$/;
+
+function paperclipMcpTokenEnvVar(connectionId: string): string | undefined {
+  const fixed = PAPERCLIP_MCP_TOKEN_ENV_VARS[connectionId];
+  if (fixed) return fixed;
+  const digest = ASSIGNMENT_CONNECTION_ID.exec(connectionId)?.[1];
+  return digest ? `PAPERCLIP_MCP_TOKEN_${digest.toUpperCase()}` : undefined;
+}
 const defaultStagedRuntimes = new Map<string, StagedRuntimeCacheEntry>();
 const defaultStagingLocks = new Map<string, Promise<unknown>>();
 
@@ -1926,12 +1943,27 @@ async function buildRuntime(input: {
     url,
     connectionId,
   }));
-  const mcpServers: NonNullable<AcpRuntimeOptions["mcpServers"]> = runtimeMcpServers.map((server) => ({
-    type: "http",
-    name: server.name,
-    url: server.url,
-    headers: [{ name: "Authorization", value: `Bearer ${server.token}` }],
-  }));
+  // ixtria #35: the Claude Agent SDK serializes MCP servers into the `claude`
+  // argv (`--mcp-config '<json>'`), readable through /proc by any local uid.
+  // For local claude runs, the Paperclip MCP headers carry a `${VAR}` reference
+  // that `claude` expands from its environment; the token goes into `env` below.
+  // Remote lanes rewrite PAPERCLIP_API_KEY to a bridge token, so they keep the
+  // literal header, as do the other agents.
+  const mcpTokenEnv: Record<string, string> = {};
+  const mcpServers: NonNullable<AcpRuntimeOptions["mcpServers"]> = runtimeMcpServers.map((server) => {
+    let envVar =
+      acpxAgent === "claude" && !executionTargetIsRemote
+        ? paperclipMcpTokenEnvVar(server.connectionId)
+        : undefined;
+    if (envVar === "PAPERCLIP_API_KEY" && server.token !== authToken) envVar = undefined;
+    if (envVar) mcpTokenEnv[envVar] = server.token;
+    return {
+      type: "http",
+      name: server.name,
+      url: server.url,
+      headers: [{ name: "Authorization", value: envVar ? `Bearer \${${envVar}}` : `Bearer ${server.token}` }],
+    };
+  });
   // Resolve the wall-clock timeout through the shared execution-target
   // resolver so sandbox-backed runs pick up the 4h backstop default while
   // local/SSH runs keep the historical "0 = no adapter timeout" behavior.
@@ -2015,6 +2047,8 @@ async function buildRuntime(input: {
     if (!scratchKeys.has(key) || value !== scratch.dir) resolvedAdapterEnv[key] = value;
   }
   if (authToken) env.PAPERCLIP_API_KEY = authToken;
+  // ixtria #35: values for the `${VAR}` MCP header references built above.
+  Object.assign(env, mcpTokenEnv);
   // For the claude agent, set model via ANTHROPIC_MODEL at startup rather than
   // via session/set_config_option — the ACP server's set_config_option handler
   // validates the value against its internal available-models list and rejects

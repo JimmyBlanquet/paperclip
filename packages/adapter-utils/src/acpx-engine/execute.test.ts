@@ -8016,3 +8016,143 @@ describe("ACPX startup handshake guard and late-completion fence", () => {
     }
   }, 10000);
 });
+
+// ixtria #35: the ACP SDK serializes MCP servers into the `claude` argv
+// (`--mcp-config '<json>'`), readable by any local uid through /proc. Local
+// claude runs must carry only `${VAR}` references there; `claude` expands them
+// from its environment, which receives the run tokens.
+describe("ACPX engine keeps Paperclip MCP bearer tokens out of the claude argv (#35)", () => {
+  const projectTools = {
+    name: "Paperclip projects",
+    url: "http://paperclip.test/api/mcp/project-tools",
+    connectionId: "paperclip-project-tools",
+    token: "fake-run-jwt-p35",
+  };
+  const runtimeTools = {
+    name: "Paperclip connections",
+    url: "http://paperclip.test/api/runtime-tools/mcp",
+    connectionId: "paperclip-runtime-tools",
+    token: "fake-runtime-tools-token-p35",
+  };
+  const assignmentDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const assignedEnvVar = `PAPERCLIP_MCP_TOKEN_${assignmentDigest.toUpperCase()}`;
+  const assignedTools = {
+    name: "Paperclip assigned tools",
+    url: "http://paperclip.test/api/mcp/gateways/fake-gateway-p35",
+    connectionId: `assignment:${assignmentDigest}`,
+    token: "fake-assignment-gateway-token-p35",
+  };
+  const claudeConfig = (root: string) => ({
+    agent: "claude", cwd: root, stateDir: path.join(root, "state"),
+    paperclipRuntimeSkills: [], paperclipSkillSync: { desiredSkills: [] },
+  });
+
+  it("references the tokens by env var in the MCP headers and puts them in the session env", async () => {
+    const root = await makeTempRoot();
+    const run = await runExecutor(claudeConfig(root), {
+      authToken: projectTools.token,
+      runtimeMcp: { getServers: () => [projectTools, runtimeTools] },
+    });
+    const mcpServers = run.runtimeOptions[0]?.mcpServers;
+    expect(mcpServers).toEqual([
+      { type: "http", name: projectTools.name, url: projectTools.url,
+        headers: [{ name: "Authorization", value: "Bearer ${PAPERCLIP_API_KEY}" }] },
+      { type: "http", name: runtimeTools.name, url: runtimeTools.url,
+        headers: [{ name: "Authorization", value: "Bearer ${PAPERCLIP_RUNTIME_TOOLS_TOKEN}" }] },
+    ]);
+    expect(JSON.stringify(mcpServers)).not.toContain(projectTools.token);
+    expect(JSON.stringify(mcpServers)).not.toContain(runtimeTools.token);
+    const env = (run.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    expect(env.PAPERCLIP_API_KEY).toBe(projectTools.token);
+    expect(env.PAPERCLIP_RUNTIME_TOOLS_TOKEN).toBe(runtimeTools.token);
+  });
+
+  it("keeps the literal header when the project-tools token is not the run API key", async () => {
+    const root = await makeTempRoot();
+    const run = await runExecutor(claudeConfig(root), {
+      authToken: "another-fake-key",
+      runtimeMcp: { getServers: () => [projectTools] },
+    });
+    expect(run.runtimeOptions[0]?.mcpServers).toEqual([
+      { type: "http", name: projectTools.name, url: projectTools.url,
+        headers: [{ name: "Authorization", value: `Bearer ${projectTools.token}` }] },
+    ]);
+    const env = (run.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    expect(env.PAPERCLIP_API_KEY).toBe("another-fake-key");
+  });
+
+  it("keeps the literal headers and leaves the token vars out of the env for a remote target", async () => {
+    const root = await makeTempRoot();
+    const remoteCwd = path.join(root, "remote-workspace");
+    await fs.mkdir(remoteCwd, { recursive: true });
+    const run = await runExecutor(claudeConfig(root), {
+      authToken: projectTools.token,
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "fake-plugin",
+        remoteCwd,
+        runner: createLocalSandboxRunner(),
+      },
+      runtimeMcp: { getServers: () => [projectTools, runtimeTools, assignedTools] },
+    });
+    expect(run.runtimeOptions[0]?.mcpServers).toEqual([
+      { type: "http", name: projectTools.name, url: projectTools.url,
+        headers: [{ name: "Authorization", value: `Bearer ${projectTools.token}` }] },
+      { type: "http", name: runtimeTools.name, url: runtimeTools.url,
+        headers: [{ name: "Authorization", value: `Bearer ${runtimeTools.token}` }] },
+      { type: "http", name: assignedTools.name, url: assignedTools.url,
+        headers: [{ name: "Authorization", value: `Bearer ${assignedTools.token}` }] },
+    ]);
+    const env = (run.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    expect(env).not.toHaveProperty("PAPERCLIP_RUNTIME_TOOLS_TOKEN");
+    expect(env).not.toHaveProperty(assignedEnvVar);
+  });
+
+  it("references the assignment gateway token by a derived env var", async () => {
+    const root = await makeTempRoot();
+    const run = await runExecutor(claudeConfig(root), {
+      authToken: projectTools.token,
+      runtimeMcp: { getServers: () => [assignedTools] },
+    });
+    expect(run.runtimeOptions[0]?.mcpServers).toEqual([
+      { type: "http", name: assignedTools.name, url: assignedTools.url,
+        headers: [{ name: "Authorization", value: `Bearer \${${assignedEnvVar}}` }] },
+    ]);
+    expect(JSON.stringify(run.runtimeOptions[0]?.mcpServers)).not.toContain(assignedTools.token);
+    const env = (run.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    expect(env[assignedEnvVar]).toBe(assignedTools.token);
+  });
+
+  it("keeps the literal header when the assignment digest cannot form a safe env var name", async () => {
+    const root = await makeTempRoot();
+    const odd = { ...assignedTools, connectionId: "assignment:ab-cd; rm -rf" };
+    const run = await runExecutor(claudeConfig(root), {
+      authToken: projectTools.token,
+      runtimeMcp: { getServers: () => [odd] },
+    });
+    expect(run.runtimeOptions[0]?.mcpServers).toEqual([
+      { type: "http", name: odd.name, url: odd.url,
+        headers: [{ name: "Authorization", value: `Bearer ${odd.token}` }] },
+    ]);
+  });
+
+  it.each(["codex", "custom"])("leaves %s MCP headers unchanged", async (agent) => {
+    const root = await makeTempRoot();
+    const run = await runExecutor({
+      agent, cwd: root, stateDir: path.join(root, "state"),
+      ...(agent === "custom" ? { agentCommand: "node ./fake-acp.js" } : {}),
+    }, {
+      authToken: projectTools.token,
+      runtimeMcp: { getServers: () => [projectTools, runtimeTools] },
+    });
+    expect(run.runtimeOptions[0]?.mcpServers).toEqual([
+      { type: "http", name: projectTools.name, url: projectTools.url,
+        headers: [{ name: "Authorization", value: `Bearer ${projectTools.token}` }] },
+      { type: "http", name: runtimeTools.name, url: runtimeTools.url,
+        headers: [{ name: "Authorization", value: `Bearer ${runtimeTools.token}` }] },
+    ]);
+    const env = (run.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    expect(env).not.toHaveProperty("PAPERCLIP_RUNTIME_TOOLS_TOKEN");
+  });
+});
