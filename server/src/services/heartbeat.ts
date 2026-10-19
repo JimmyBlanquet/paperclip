@@ -7074,7 +7074,12 @@ export function shouldQueueFollowupForRunningIssueWake(input: {
     return true;
   }
   const wakeReason = readNonEmptyString(input.contextSnapshot?.wakeReason);
-  if (wakeReason === "issue_children_completed" && input.contextSnapshot?.onboardingCompletion === true) return true;
+  if (wakeReason === "issue_children_completed" && (
+    input.contextSnapshot?.onboardingCompletion === true ||
+    // A child closed through the issues API writes its summary after the
+    // running turn read its context; only a fresh turn can consume it.
+    input.contextSnapshot?.source === "issue.children_completed"
+  )) return true;
   return Boolean(
     wakeReason && RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP.has(wakeReason),
   );
